@@ -1,0 +1,32 @@
+disabled_rules:
+  - identifier_name
+  - large_tuple
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+
+opt_in_rules:
+  - empty_count
+  - force_unwrapping
+
+excluded:
+  - Pods
+  - .build
+
+line_length:
+  warning: 150
+  error: 200
+
+trailing_whitespace:
+  ignores_empty_lines: false
+  ignores_comments: false
+
+unused_optional_binding:
+  severity: warning
+
+for_where:
+  severity: warning
+
+multiple_closures_with_trailing_closure:
+  severity: warning
