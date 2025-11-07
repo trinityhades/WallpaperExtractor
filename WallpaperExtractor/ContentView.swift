@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 import AppKit
 
 struct ContentView: View {
-    @StateObject private var extractor = PackageExtractor()
+    @EnvironmentObject private var extractor: PackageExtractor
     @StateObject private var steamManager = SteamCMDManager()
     @State private var isImporting = false
     @State private var showingAlert = false
@@ -113,7 +113,7 @@ struct ContentView: View {
             handleFileSelection(result)
         }
         .sheet(isPresented: $showingWorkshopSheet) {
-            WorkshopDownloadView(steamManager: steamManager, extractor: extractor) { error in
+            WorkshopDownloadView(steamManager: steamManager) { error in
                 if let error = error {
                     alertMessage = error.localizedDescription
                     showingAlert = true
@@ -290,16 +290,17 @@ struct ExtractedImage: Identifiable {
 
 struct WorkshopDownloadView: View {
     @ObservedObject var steamManager: SteamCMDManager
-    @ObservedObject var extractor: PackageExtractor
     let onError: (Error?) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var extractor: PackageExtractor
     @State private var workshopURL: String = ""
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var isProcessing: Bool = false
     @State private var foundPKGFiles: [URL] = []
     @State private var showingPKGPicker: Bool = false
+    @State private var showingSteamCMDPicker: Bool = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -313,6 +314,28 @@ struct WorkshopDownloadView: View {
             }
             .padding(.top)
 
+            // SteamCMD quick settings row (always available)
+            HStack(spacing: 12) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .foregroundColor(.secondary)
+                Text("SteamCMD:")
+                    .foregroundColor(.secondary)
+                Text(steamManager.configuredSteamCMDPath?.path ?? "Not set")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if let eff = steamManager.effectiveSteamCMDURL {
+                    Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([eff]) }
+                }
+                Button("Change…") { showingSteamCMDPicker = true }
+                Button("Reset") {
+                    steamManager.resetSteamCMDPath()
+                }
+            }
+            .padding(.horizontal)
+
             if !steamManager.isSteamCMDInstalled {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
@@ -320,8 +343,23 @@ struct WorkshopDownloadView: View {
                         .foregroundColor(.orange)
                     Text("SteamCMD Not Found")
                         .font(.headline)
-                    Text("Please install SteamCMD at \(FileManager.default.homeDirectoryForCurrentUser.path)/Steam/")
+                    Text("Install SteamCMD or choose an existing steamcmd executable")
                         .foregroundColor(.secondary)
+                    Text("Expected at: \(FileManager.default.homeDirectoryForCurrentUser.path)/Steam/steamcmd or steamcmd.sh")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    HStack(spacing: 12) {
+                        Button("Install SteamCMD") {
+                            Task {
+                                do {
+                                    try await steamManager.installSteamCMD()
+                                } catch {
+                                    onError(error)
+                                }
+                            }
+                        }
+                        Button("Choose steamcmd…") { showingSteamCMDPicker = true }
+                    }
                     Button("Install Instructions") {
                         NSWorkspace.shared.open(URL(string: "https://developer.valvesoftware.com/wiki/SteamCMD")!)
                     }
@@ -510,9 +548,20 @@ struct WorkshopDownloadView: View {
             Spacer()
         }
         .frame(minWidth: 500, minHeight: 400)
+        .fileImporter(isPresented: $showingSteamCMDPicker, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                print("[WorkshopDownloadView] Picked steamcmd path -> \(url.path)")
+                steamManager.setSteamCMDPath(url)
+            case .failure(let error):
+                onError(error)
+            }
+        }
     }
 }
 
 #Preview {
     ContentView()
+        .environmentObject(PackageExtractor())
 }

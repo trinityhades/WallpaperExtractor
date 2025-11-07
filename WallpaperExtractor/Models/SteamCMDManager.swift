@@ -9,29 +9,74 @@ class SteamCMDManager: ObservableObject {
     @Published var isDownloading: Bool = false
     @Published var downloadProgress: String = ""
     @Published var lastDownloadedPath: URL?
+    @Published var configuredSteamCMDPath: URL? {
+        didSet {
+            if let url = configuredSteamCMDPath {
+                UserDefaults.standard.set(url.path, forKey: Self.defaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+            }
+            objectWillChange.send()
+        }
+    }
 
-    private var steamCMDPath: String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/Steam/steamcmd.sh"
+    private static let defaultsKey = "steamcmd.path"
+
+    private var defaultSteamCMDURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Steam")
+            .appendingPathComponent("steamcmd")
     }
-    private var steamDirectory: String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/Steam"
+
+    private var secondaryDefaultSteamCMDURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Steam")
+            .appendingPathComponent("steamcmd.sh")
     }
+
+    private var steamCMDURL: URL {
+        if let set = configuredSteamCMDPath { return set }
+        // Prefer 'steamcmd', fallback to 'steamcmd.sh'
+        let fm = FileManager.default
+        if fm.fileExists(atPath: defaultSteamCMDURL.path) { return defaultSteamCMDURL }
+        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) { return secondaryDefaultSteamCMDURL }
+        return defaultSteamCMDURL
+    }
+
+    private var steamDirectoryURL: URL { steamCMDURL.deletingLastPathComponent() }
     private let workshopAppID = "431960" // Wallpaper Engine
 
     init() {
+        if let saved = UserDefaults.standard.string(forKey: Self.defaultsKey) {
+            let url = URL(fileURLWithPath: saved)
+            if FileManager.default.fileExists(atPath: url.path) { configuredSteamCMDPath = url }
+        }
         checkLoginStatus()
     }
 
     var isSteamCMDInstalled: Bool {
-        FileManager.default.fileExists(atPath: steamCMDPath)
+        let fm = FileManager.default
+        if let set = configuredSteamCMDPath, fm.fileExists(atPath: set.path) { return true }
+        if fm.fileExists(atPath: defaultSteamCMDURL.path) { return true }
+        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) { return true }
+        return false
+    }
+
+    // Expose the currently selected or detected path for UI display (show configured even if missing)
+    var effectiveSteamCMDURL: URL? {
+        if let set = configuredSteamCMDPath { return set }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: defaultSteamCMDURL.path) { return defaultSteamCMDURL }
+        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) { return secondaryDefaultSteamCMDURL }
+        return nil
     }
 
     func checkLoginStatus() {
         // Check if there's a saved login by looking for the loginusers.vdf file
-        let steamPath = FileManager.default.homeDirectoryForCurrentUser.path + "/Steam/steamapps"
+        let steamPath = steamDirectoryURL.appendingPathComponent("steamapps").path
         if FileManager.default.fileExists(atPath: steamPath) {
             // Try to read config to see if logged in
-            let configPath = FileManager.default.homeDirectoryForCurrentUser.path + "/Steam/config/config.vdf"
+            let configPath = steamDirectoryURL.appendingPathComponent("config/config.vdf").path
             if FileManager.default.fileExists(atPath: configPath) {
                 isLoggedIn = true
             }
@@ -46,9 +91,11 @@ class SteamCMDManager: ObservableObject {
         self.username = username
         downloadProgress = "Logging in to Steam..."
 
+        do { try prepareSteamCMD() } catch { throw error }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", "cd '\(steamDirectory)' && ./steamcmd.sh +login \(username) \(password) +quit"]
+        process.arguments = ["-c", "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent) +login \(username) \(password) +quit"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -117,6 +164,9 @@ class SteamCMDManager: ObservableObject {
         } else {
             let data = try? pipe.fileHandleForReading.readToEnd()
             let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            if output.contains("operation not permitted") {
+                throw SteamCMDError.permissionDenied("Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd")
+            }
             throw SteamCMDError.loginFailed(output)
         }
     }
@@ -151,9 +201,11 @@ class SteamCMDManager: ObservableObject {
             isDownloading = false
         }
 
+        do { try prepareSteamCMD() } catch { throw error }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let cmd = "cd '\(steamDirectory)' && ./steamcmd.sh +login \(username) " +
+        let cmd = "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent) +login \(username) " +
                   "+workshop_download_item \(workshopAppID) \(workshopID) validate +quit"
         process.arguments = ["-c", cmd]
 
@@ -194,6 +246,9 @@ class SteamCMDManager: ObservableObject {
         } else {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
+            if output.contains("operation not permitted") {
+                throw SteamCMDError.permissionDenied("Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd")
+            }
             throw SteamCMDError.downloadFailed(output)
         }
     }
@@ -210,6 +265,95 @@ class SteamCMDManager: ObservableObject {
 
         return pkgFiles
     }
+
+    func setSteamCMDPath(_ url: URL) {
+        print("[SteamCMDManager] Setting steamcmd path -> \(url.path)")
+        configuredSteamCMDPath = url
+        // Try to make it usable right away
+        try? prepareSteamCMD()
+    }
+
+    func resetSteamCMDPath() {
+        print("[SteamCMDManager] Resetting steamcmd path to default detection")
+        configuredSteamCMDPath = nil
+    }
+
+    private func prepareSteamCMD() throws {
+        guard let url = effectiveSteamCMDURL ?? configuredSteamCMDPath else { return }
+        let path = url.path
+        // If the file isn't executable, try to chmod +x
+        if !FileManager.default.isExecutableFile(atPath: path) {
+            let chmod = Process()
+            chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmod.arguments = ["+x", path]
+            try chmod.run()
+            chmod.waitUntilExit()
+        }
+        // Remove quarantine if present (Gatekeeper can block exec -> operation not permitted)
+        let xattrList = Process()
+        xattrList.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        xattrList.arguments = ["-p", "com.apple.quarantine", path]
+        let pipe = Pipe()
+        xattrList.standardOutput = pipe
+        xattrList.standardError = Pipe()
+        try? xattrList.run()
+        xattrList.waitUntilExit()
+        if xattrList.terminationStatus == 0 { // attribute exists
+            let xattrDel = Process()
+            xattrDel.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+            xattrDel.arguments = ["-d", "com.apple.quarantine", path]
+            try? xattrDel.run()
+            xattrDel.waitUntilExit()
+            if xattrDel.terminationStatus != 0 {
+                throw SteamCMDError.permissionDenied("Unable to remove quarantine from steamcmd. Run: xattr -d com.apple.quarantine \"\(path)\"")
+            }
+        }
+
+        // Warn if inside app container; execution may be restricted in some setups
+        if path.contains("/Library/Containers/") {
+            // Not a hard error, but caller may show this info if subsequent exec fails
+            print("[SteamCMDManager] steamcmd is inside an app container: \(path)")
+        }
+    }
+
+    func installSteamCMD(to installDir: URL? = nil) async throws -> URL {
+        let baseDir = installDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam")
+        try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+
+        let archiveURL = URL(string: "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz")!
+        downloadProgress = "Downloading SteamCMD..."
+
+        let (tmpFile, response) = try await URLSession.shared.download(from: archiveURL)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw SteamCMDError.downloadFailed("Failed to download SteamCMD")
+        }
+
+        downloadProgress = "Installing SteamCMD..."
+        // Extract archive into baseDir
+        let tar = Process()
+        tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        tar.currentDirectoryURL = baseDir
+        tar.arguments = ["-xzf", tmpFile.path]
+        try tar.run()
+        tar.waitUntilExit()
+        if tar.terminationStatus != 0 { throw SteamCMDError.downloadFailed("Extraction failed") }
+
+        // Pick the installed executable: prefer 'steamcmd', fallback to 'steamcmd.sh'
+        let fm = FileManager.default
+        let exe = baseDir.appendingPathComponent("steamcmd")
+        let sh = baseDir.appendingPathComponent("steamcmd.sh")
+        let steamcmd = fm.fileExists(atPath: exe.path) ? exe : sh
+
+        // Ensure executable bit
+        let chmod = Process()
+        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmod.arguments = ["+x", steamcmd.path]
+        try? chmod.run()
+        chmod.waitUntilExit()
+
+        configuredSteamCMDPath = steamcmd
+        return steamcmd
+    }
 }
 
 enum SteamCMDError: LocalizedError {
@@ -218,12 +362,14 @@ enum SteamCMDError: LocalizedError {
     case invalidURL
     case loginFailed(String)
     case downloadFailed(String)
+    case permissionDenied(String)
 
     var errorDescription: String? {
         switch self {
         case .notInstalled:
-            let steamPath = FileManager.default.homeDirectoryForCurrentUser.path + "/Steam/steamcmd.sh"
-            return "SteamCMD is not installed at \(steamPath)"
+            let expected1 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam/steamcmd").path
+            let expected2 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam/steamcmd.sh").path
+            return "SteamCMD not found. Install it or choose an existing executable (expected at \(expected1) or \(expected2))."
         case .notLoggedIn:
             return "You must be logged in to download workshop items"
         case .invalidURL:
@@ -232,6 +378,8 @@ enum SteamCMDError: LocalizedError {
             return "Login failed: \(message)"
         case .downloadFailed(let message):
             return "Download failed: \(message)"
+        case .permissionDenied(let message):
+            return "Permission issue: \(message)"
         }
     }
 }

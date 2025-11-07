@@ -4,7 +4,7 @@ struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 10) {
             // App Icon and Title
             Image(systemName: "photo.stack")
                 .font(.system(size: 60))
@@ -83,7 +83,6 @@ struct AboutView: View {
             }
             .padding(.top, 8)
 
-            Spacer()
 
             // Close Button
             Button("Close") {
