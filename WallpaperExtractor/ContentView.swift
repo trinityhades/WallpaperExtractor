@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -84,19 +85,8 @@ struct ContentView: View {
                     .padding([.top, .horizontal])
                     Divider()
                     if !node.isDirectory {
-                        if let img = extractor.previewImage(for: node.path) {
-                            ScrollView {
-                                Image(nsImage: img)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                            }
-                        } else {
-                            Text("No preview available")
-                                .foregroundColor(.secondary)
-                                .padding()
-                        }
+                        PackageFilePreview(path: node.path)
+                            .environmentObject(extractor)
                     } else {
                         Text("Folder contains \(node.children.count) item(s)")
                             .foregroundColor(.secondary)
@@ -185,6 +175,69 @@ struct ContentView: View {
     }
 
     private func exportAll() {}
+}
+
+private struct PackageFilePreview: View {
+    let path: String
+    @EnvironmentObject private var extractor: PackageExtractor
+    @State private var previewContent: PackageExtractor.PreviewContent = .unsupported
+
+    var body: some View {
+        Group {
+            switch previewContent {
+            case .image(let image):
+                ScrollView {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+            case .video(let url):
+                VideoPreview(url: url)
+                    .padding()
+            case .unsupported:
+                Text("No preview available")
+                    .foregroundColor(.secondary)
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .task(id: path) {
+            previewContent = extractor.previewContent(for: path)
+        }
+    }
+}
+
+private struct VideoPreview: View {
+    let url: URL
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VideoPlayer(player: player)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.9))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            Text(url.lastPathComponent)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .task(id: url) {
+            let newPlayer = AVPlayer(url: url)
+            newPlayer.pause()
+            player = newPlayer
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
 }
 
 private func byteCount(_ bytes: Int) -> String {

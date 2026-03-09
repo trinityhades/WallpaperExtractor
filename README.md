@@ -2,7 +2,7 @@
 <a name="top"></a>
 
 <div align="center">
-  <img src="WallpaperExtractor/Assets.xcassets/AppIcon.appiconset/512.png" alt="Wallpaper Extractor Logo" width="200"/>
+  <img src="WallpaperExtractor/new_icon.icon/Assets/WallpaperExtractorIcon.svg" alt="Wallpaper Extractor Logo" width="200"/>
   
   # Wallpaper Extractor
   

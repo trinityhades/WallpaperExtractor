@@ -5,6 +5,12 @@ import ImageIO
 import UniformTypeIdentifiers
 
 class PackageExtractor: ObservableObject {
+    enum PreviewContent {
+        case image(NSImage)
+        case video(URL)
+        case unsupported
+    }
+
     @Published var extractedImages: [ExtractedImage] = []
     @Published var isExtracting = false
     @Published var extractionProgress: Double = 0.0  // 0.0 - 1.0
@@ -23,8 +29,13 @@ class PackageExtractor: ObservableObject {
 
     // Remove stale temporary raw exported files created for drag-and-drop.
     func cleanupTemporaryRawDirectory() {
+        cleanupTemporaryDirectory(named: "WallpaperExtractorRaw")
+        cleanupTemporaryDirectory(named: "WallpaperExtractorPreview")
+    }
+
+    private func cleanupTemporaryDirectory(named directoryName: String) {
         let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "WallpaperExtractorRaw", isDirectory: true)
+            directoryName, isDirectory: true)
         do {
             if FileManager.default.fileExists(atPath: tempRoot.path) {
                 let contents = try FileManager.default.contentsOfDirectory(
@@ -129,16 +140,43 @@ class PackageExtractor: ObservableObject {
     }
 
     func previewImage(for path: String) -> NSImage? {
+        switch previewContent(for: path) {
+        case .image(let image):
+            return image
+        case .video, .unsupported:
+            return nil
+        }
+    }
+
+    func previewContent(for path: String) -> PreviewContent {
         let lower = path.lowercased()
         do {
             let bytes = try dataFor(path: path)
             if lower.hasSuffix(".tex") {
-                if let image = try TexDecoder.decode(bytes) { return image }
-                return nil
-            } else {
-                return decodeAnyImage(from: bytes)
+                if let embeddedVideoData = extractEmbeddedMP4(from: bytes) {
+                    let videoURL = try temporaryPreviewVideoURL(
+                        for: path, videoData: embeddedVideoData, fileExtension: "mp4")
+                    return .video(videoURL)
+                }
+                if let image = try TexDecoder.decode(bytes) {
+                    return .image(image)
+                }
+                return .unsupported
             }
-        } catch { return nil }
+            if Self.isVideoPath(lower) {
+                let pathExtension = (path as NSString).pathExtension
+                let videoURL = try temporaryPreviewVideoURL(
+                    for: path, videoData: bytes,
+                    fileExtension: pathExtension.isEmpty ? "mp4" : pathExtension)
+                return .video(videoURL)
+            }
+            if let image = decodeAnyImage(from: bytes) {
+                return .image(image)
+            }
+            return .unsupported
+        } catch {
+            return .unsupported
+        }
     }
 
     private func buildFileTree(from entries: [PackageEntry]) -> [FileNode] {
@@ -565,6 +603,41 @@ class PackageExtractor: ObservableObject {
         return lowercasedPath.hasSuffix(".mp4") || lowercasedPath.hasSuffix(".mov")
             || lowercasedPath.hasSuffix(".m4v") || lowercasedPath.hasSuffix(".avi")
             || lowercasedPath.hasSuffix(".webm")
+    }
+
+    private func extractEmbeddedMP4(from bytes: Data) -> Data? {
+        guard bytes.count >= 8 else { return nil }
+        let searchLimit = min(200, max(0, bytes.count - 4))
+        for offset in 0..<searchLimit where bytes[offset] == 0x66 {
+            if bytes[offset + 1] == 0x74 && bytes[offset + 2] == 0x79
+                && bytes[offset + 3] == 0x70
+            {
+                let start = max(0, offset - 4)
+                return bytes.subdata(in: start..<bytes.count)
+            }
+        }
+        return nil
+    }
+
+    private func temporaryPreviewVideoURL(for path: String, videoData: Data, fileExtension: String)
+        throws -> URL
+    {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "WallpaperExtractorPreview", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+
+        let originalName = (path as NSString).deletingPathExtension
+        let sanitizedName = originalName
+            .replacingOccurrences(of: "/", with: "__")
+            .replacingOccurrences(of: ":", with: "_")
+        let targetURL = tempRoot.appendingPathComponent(sanitizedName).appendingPathExtension(
+            fileExtension)
+
+        if !FileManager.default.fileExists(atPath: targetURL.path) {
+            try videoData.write(to: targetURL, options: .atomic)
+        }
+
+        return targetURL
     }
 
     private func uniqueOutputURL(baseName: String, destinationFolder: URL, flatten: Bool) -> URL {
