@@ -1,5 +1,5 @@
-import AppKit
 import AVKit
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 

@@ -627,7 +627,8 @@ class PackageExtractor: ObservableObject {
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
 
         let originalName = (path as NSString).deletingPathExtension
-        let sanitizedName = originalName
+        let sanitizedName =
+            originalName
             .replacingOccurrences(of: "/", with: "__")
             .replacingOccurrences(of: ":", with: "_")
         let targetURL = tempRoot.appendingPathComponent(sanitizedName).appendingPathExtension(
