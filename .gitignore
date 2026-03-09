@@ -67,3 +67,7 @@ Test/
 
 # SwiftPM binary artifacts
 .artifacts/
+.DS_Store
+
+# GitShift personal account configuration
+**/github-accounts.json

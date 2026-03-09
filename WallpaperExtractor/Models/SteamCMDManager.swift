@@ -1,6 +1,6 @@
-import Foundation
 import AppKit
 import Combine
+import Foundation
 
 @MainActor
 class SteamCMDManager: ObservableObject {
@@ -39,12 +39,14 @@ class SteamCMDManager: ObservableObject {
         // Prefer 'steamcmd', fallback to 'steamcmd.sh'
         let fm = FileManager.default
         if fm.fileExists(atPath: defaultSteamCMDURL.path) { return defaultSteamCMDURL }
-        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) { return secondaryDefaultSteamCMDURL }
+        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) {
+            return secondaryDefaultSteamCMDURL
+        }
         return defaultSteamCMDURL
     }
 
     private var steamDirectoryURL: URL { steamCMDURL.deletingLastPathComponent() }
-    private let workshopAppID = "431960" // Wallpaper Engine
+    let workshopAppID = "431960"  // Wallpaper Engine
 
     init() {
         if let saved = UserDefaults.standard.string(forKey: Self.defaultsKey) {
@@ -67,7 +69,9 @@ class SteamCMDManager: ObservableObject {
         if let set = configuredSteamCMDPath { return set }
         let fm = FileManager.default
         if fm.fileExists(atPath: defaultSteamCMDURL.path) { return defaultSteamCMDURL }
-        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) { return secondaryDefaultSteamCMDURL }
+        if fm.fileExists(atPath: secondaryDefaultSteamCMDURL.path) {
+            return secondaryDefaultSteamCMDURL
+        }
         return nil
     }
 
@@ -83,7 +87,7 @@ class SteamCMDManager: ObservableObject {
         }
     }
 
-    func login(username: String, password: String) async throws {
+    func login(username: String, password: String, steamGuardCode: String? = nil) async throws {
         guard isSteamCMDInstalled else {
             throw SteamCMDError.notInstalled
         }
@@ -95,7 +99,15 @@ class SteamCMDManager: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent) +login \(username) \(password) +quit"]
+
+        // Build command with optional Steam Guard code
+        var command = "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent)"
+        if let code = steamGuardCode, !code.isEmpty {
+            command += " +set_steam_guard_code \(code)"
+        }
+        command += " +login \(username) \(password) +quit"
+
+        process.arguments = ["-c", command]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -104,39 +116,74 @@ class SteamCMDManager: ObservableObject {
         try process.run()
 
         // Read output on a background thread and update UI on main thread
+        var allOutput = ""
+        var loginSucceeded = false
+        var loginFailed = false
+        var waitingForUserInfo = false
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let outputHandle = pipe.fileHandleForReading
-                var allOutput = ""
 
                 while process.isRunning {
                     let data = outputHandle.availableData
                     if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
                         allOutput += output
-                        print("🔍 SteamCMD Output: \(output)") // Debug logging
-                        
+                        print("[SteamCMD] \(output)", terminator: "")
+
                         // Parse steamcmd output for meaningful status updates
                         let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
                         for line in lines {
-                            print("📝 Processing line: \(line)") // Debug logging
+                            // Check for login success/failure indicators
+                            if line.contains("Waiting for user info") {
+                                waitingForUserInfo = true
+                            } else if waitingForUserInfo
+                                && line.trimmingCharacters(in: .whitespacesAndNewlines) == "OK"
+                            {
+                                loginSucceeded = true
+                                waitingForUserInfo = false
+                            } else if line.contains("Logged in OK")
+                                || line.contains("user info...OK")
+                            {
+                                loginSucceeded = true
+                            } else if line.contains("FAILED") || line.contains("Invalid Password")
+                                || line.contains("Login Failure")
+                            {
+                                loginFailed = true
+                            }
+
                             Task { @MainActor in
-                                if line.contains("Steam Guard mobile authenticator") || line.contains("two-factor") {
-                                    self.downloadProgress = "🔐 Waiting for Steam Guard approval on your mobile device..."
+                                if line.contains("Steam Guard mobile authenticator")
+                                    || line.contains("two-factor")
+                                {
+                                    self.downloadProgress =
+                                        "🔐 Waiting for Steam Guard approval on your mobile device..."
                                 } else if line.contains("Waiting for confirmation") {
-                                    self.downloadProgress = "🔐 Waiting for Steam Guard confirmation..."
-                                } else if line.contains("Waiting for client config") || line.contains("client config") {
+                                    self.downloadProgress =
+                                        "🔐 Waiting for Steam Guard confirmation..."
+                                } else if line.contains("Waiting for client config")
+                                    || line.contains("client config")
+                                {
                                     self.downloadProgress = "⏳ Loading Steam configuration..."
-                                } else if line.contains("Waiting for user info") || line.contains("user info") {
+                                } else if line.contains("Waiting for user info")
+                                    || line.contains("user info")
+                                {
                                     self.downloadProgress = "⏳ Retrieving user information..."
                                 } else if line.contains("Logging in user") {
                                     self.downloadProgress = "🔄 Authenticating with Steam..."
-                                } else if line.contains("Logged in OK") || line.contains("Success") {
+                                } else if line.contains("Logged in OK") || line.contains("Success")
+                                {
                                     self.downloadProgress = "✅ Login successful!"
-                                } else if line.contains("FAILED") || line.contains("Invalid Password") {
+                                } else if line.contains("FAILED")
+                                    || line.contains("Invalid Password")
+                                {
                                     self.downloadProgress = "❌ Login failed"
-                                } else if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                } else if !line.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty
+                                {
                                     // Show any non-empty line as progress
-                                    self.downloadProgress = "🔄 \(line.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))"
+                                    self.downloadProgress =
+                                        "🔄 \(line.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))"
                                 }
                             }
                         }
@@ -146,28 +193,87 @@ class SteamCMDManager: ObservableObject {
 
                 // Read any remaining data
                 let remainingData = outputHandle.readDataToEndOfFile()
-                if !remainingData.isEmpty, let output = String(data: remainingData, encoding: .utf8) {
+                if !remainingData.isEmpty, let output = String(data: remainingData, encoding: .utf8)
+                {
                     allOutput += output
-                    print("🔍 Final SteamCMD Output: \(output)") // Debug logging
+                    print("[SteamCMD] \(output)", terminator: "")
+
+                    // Check final output for login indicators
+                    let lines = output.components(separatedBy: "\n")
+                    for (index, line) in lines.enumerated() {
+                        if line.contains("Waiting for user info") {
+                            waitingForUserInfo = true
+                        } else if waitingForUserInfo
+                            && line.trimmingCharacters(in: .whitespacesAndNewlines) == "OK"
+                        {
+                            loginSucceeded = true
+                            waitingForUserInfo = false
+                        } else if line.contains("Logged in OK") || line.contains("user info...OK") {
+                            loginSucceeded = true
+                        } else if line.contains("FAILED") || line.contains("Invalid Password")
+                            || line.contains("Login Failure")
+                        {
+                            loginFailed = true
+                        }
+                    }
                 }
-                
-                print("📊 Complete SteamCMD Output:\n\(allOutput)") // Debug logging
+
+                // Also check the complete output for the pattern
+                if !loginSucceeded && allOutput.contains("Waiting for user info") {
+                    let allLines = allOutput.components(separatedBy: "\n")
+                    for (index, line) in allLines.enumerated() {
+                        if line.contains("Waiting for user info") && index + 1 < allLines.count {
+                            let nextLine = allLines[index + 1].trimmingCharacters(
+                                in: .whitespacesAndNewlines)
+                            if nextLine == "OK" {
+                                loginSucceeded = true
+                                break
+                            }
+                        }
+                    }
+                }
+
+                print("[SteamCMD] Process completed with exit code: \(process.terminationStatus)")
 
                 process.waitUntilExit()
                 continuation.resume()
             }
         }
 
-        if process.terminationStatus == 0 {
+        // Check for explicit login success in output, not just exit code
+        if loginFailed {
+            // Explicit failure detected in output
+            if allOutput.contains("Invalid Password") {
+                throw SteamCMDError.loginFailed("Invalid username or password")
+            } else if allOutput.contains("two-factor") || allOutput.contains("Steam Guard") {
+                throw SteamCMDError.loginFailed(
+                    "Steam Guard authentication required but not completed")
+            } else {
+                throw SteamCMDError.loginFailed("Login failed: \(allOutput)")
+            }
+        } else if loginSucceeded {
+            // Explicit success detected in output
             isLoggedIn = true
             downloadProgress = "✅ Successfully logged in!"
-        } else {
-            let data = try? pipe.fileHandleForReading.readToEnd()
-            let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            if output.contains("operation not permitted") {
-                throw SteamCMDError.permissionDenied("Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd")
+        } else if process.terminationStatus == 0 {
+            // Process exited cleanly but no explicit success/failure - check for known issues
+            if allOutput.contains("operation not permitted") {
+                throw SteamCMDError.permissionDenied(
+                    "Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd"
+                )
             }
-            throw SteamCMDError.loginFailed(output)
+            // Exit code 0 but no "Logged in OK" - treat as uncertain/failed
+            throw SteamCMDError.loginFailed(
+                "Login process completed but status unclear. Output: \(allOutput)")
+        } else {
+            // Non-zero exit code
+            if allOutput.contains("operation not permitted") {
+                throw SteamCMDError.permissionDenied(
+                    "Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd"
+                )
+            }
+            throw SteamCMDError.loginFailed(
+                "Process failed with exit code \(process.terminationStatus). Output: \(allOutput)")
         }
     }
 
@@ -175,10 +281,11 @@ class SteamCMDManager: ObservableObject {
         // Extract workshop item ID from URL like:
         // https://steamcommunity.com/sharedfiles/filedetails/?id=2360329512
         guard let url = URL(string: urlString),
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let queryItems = components.queryItems,
-              let idItem = queryItems.first(where: { $0.name == "id" }),
-              let workshopID = idItem.value else {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let queryItems = components.queryItems,
+            let idItem = queryItems.first(where: { $0.name == "id" }),
+            let workshopID = idItem.value
+        else {
             throw SteamCMDError.invalidURL
         }
 
@@ -205,8 +312,9 @@ class SteamCMDManager: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        let cmd = "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent) +login \(username) " +
-                  "+workshop_download_item \(workshopAppID) \(workshopID) validate +quit"
+        let cmd =
+            "cd '\(steamDirectoryURL.path)' && ./\(steamCMDURL.lastPathComponent) +login \(username) "
+            + "+workshop_download_item \(workshopAppID) \(workshopID) validate +quit"
         process.arguments = ["-c", cmd]
 
         let pipe = Pipe()
@@ -218,8 +326,10 @@ class SteamCMDManager: ObservableObject {
         outputHandle.readabilityHandler = { handle in
             let data = handle.availableData
             if let output = String(data: data, encoding: .utf8), !output.isEmpty {
+                print("[SteamCMD Download] \(output)", terminator: "")
                 Task { @MainActor in
-                    self.downloadProgress = output.components(separatedBy: "\n").last ?? self.downloadProgress
+                    self.downloadProgress =
+                        output.components(separatedBy: "\n").last ?? self.downloadProgress
                 }
             }
         }
@@ -228,26 +338,31 @@ class SteamCMDManager: ObservableObject {
         process.waitUntilExit()
 
         outputHandle.readabilityHandler = nil
+        print("[SteamCMD Download] Process completed with exit code: \(process.terminationStatus)")
 
         if process.terminationStatus == 0 {
             downloadProgress = "Download complete!"
 
             // The downloaded content is in ~/Library/Application Support/Steam/steamapps/workshop/content/431960/{workshopID}
             let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
-            let downloadPath = "\(homeDirectory)/Library/Application Support/Steam/steamapps/workshop/content/\(workshopAppID)/\(workshopID)"
+            let downloadPath =
+                "\(homeDirectory)/Library/Application Support/Steam/steamapps/workshop/content/\(workshopAppID)/\(workshopID)"
             let url = URL(fileURLWithPath: downloadPath)
 
             if FileManager.default.fileExists(atPath: downloadPath) {
                 lastDownloadedPath = url
                 return url
             } else {
-                throw SteamCMDError.downloadFailed("Download completed but files not found at expected location")
+                throw SteamCMDError.downloadFailed(
+                    "Download completed but files not found at expected location")
             }
         } else {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
             if output.contains("operation not permitted") {
-                throw SteamCMDError.permissionDenied("Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd")
+                throw SteamCMDError.permissionDenied(
+                    "Execution blocked. Try moving steamcmd to ~/Steam and running: chmod +x steamcmd && xattr -d com.apple.quarantine steamcmd"
+                )
             }
             throw SteamCMDError.downloadFailed(output)
         }
@@ -257,8 +372,12 @@ class SteamCMDManager: ObservableObject {
         let fileManager = FileManager.default
         var pkgFiles: [URL] = []
 
-        if let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
-            for case let fileURL as URL in enumerator where fileURL.pathExtension.lowercased() == "pkg" {
+        if let enumerator = fileManager.enumerator(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles])
+        {
+            for case let fileURL as URL in enumerator
+            where fileURL.pathExtension.lowercased() == "pkg" {
                 pkgFiles.append(fileURL)
             }
         }
@@ -298,14 +417,16 @@ class SteamCMDManager: ObservableObject {
         xattrList.standardError = Pipe()
         try? xattrList.run()
         xattrList.waitUntilExit()
-        if xattrList.terminationStatus == 0 { // attribute exists
+        if xattrList.terminationStatus == 0 {  // attribute exists
             let xattrDel = Process()
             xattrDel.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
             xattrDel.arguments = ["-d", "com.apple.quarantine", path]
             try? xattrDel.run()
             xattrDel.waitUntilExit()
             if xattrDel.terminationStatus != 0 {
-                throw SteamCMDError.permissionDenied("Unable to remove quarantine from steamcmd. Run: xattr -d com.apple.quarantine \"\(path)\"")
+                throw SteamCMDError.permissionDenied(
+                    "Unable to remove quarantine from steamcmd. Run: xattr -d com.apple.quarantine \"\(path)\""
+                )
             }
         }
 
@@ -317,10 +438,13 @@ class SteamCMDManager: ObservableObject {
     }
 
     func installSteamCMD(to installDir: URL? = nil) async throws -> URL {
-        let baseDir = installDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam")
+        let baseDir =
+            installDir
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam")
         try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
 
-        let archiveURL = URL(string: "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz")!
+        let archiveURL = URL(
+            string: "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz")!
         downloadProgress = "Downloading SteamCMD..."
 
         let (tmpFile, response) = try await URLSession.shared.download(from: archiveURL)
@@ -367,13 +491,19 @@ enum SteamCMDError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notInstalled:
-            let expected1 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam/steamcmd").path
-            let expected2 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Steam/steamcmd.sh").path
-            return "SteamCMD not found. Install it or choose an existing executable (expected at \(expected1) or \(expected2))."
+            let expected1 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+                "Steam/steamcmd"
+            ).path
+            let expected2 = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+                "Steam/steamcmd.sh"
+            ).path
+            return
+                "SteamCMD not found. Install it or choose an existing executable (expected at \(expected1) or \(expected2))."
         case .notLoggedIn:
             return "You must be logged in to download workshop items"
         case .invalidURL:
-            return "Invalid Steam Workshop URL. Expected format: https://steamcommunity.com/sharedfiles/filedetails/?id=XXXXXXXXX"
+            return
+                "Invalid Steam Workshop URL. Expected format: https://steamcommunity.com/sharedfiles/filedetails/?id=XXXXXXXXX"
         case .loginFailed(let message):
             return "Login failed: \(message)"
         case .downloadFailed(let message):

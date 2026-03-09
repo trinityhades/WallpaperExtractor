@@ -54,7 +54,8 @@ A powerful **macOS** application for downloading and extracting Wallpaper Engine
 - 📦 **Steam Workshop Integration**: Download wallpapers directly from Steam Workshop
   - Automatic Steam Guard authentication support
   - Real-time download progress tracking
-- 💾 **Export All**: Extract entire packages with one click, automatically opens the export folder in Finder
+- 💾 **Export…**: Choose destination; selectively export Images, Videos, Other files; optional Flatten; and a "Trinity's Preferred" preset that puts Materials PNGs into `Main Images` and consolidates `effects`, `masks`, `models`, and `xray` into unified top-level folders. Automatically opens the export folder in Finder.
+- 🖱️ **Drag Raw Files Out**: Drag any file from the package tree directly to Finder — exports the original bytes without conversion.
 - 🖼️ **Live Preview**: Preview images directly in the app
 
 ## 📦 Installation
@@ -117,7 +118,7 @@ ls ~/Steam/steamcmd.sh
 
 1. Click **Open PKG...** to browse for a local `.pkg` file
 2. Browse the file tree to explore contents
-3. Click **Export All...** to extract all files
+3. Click **Export…** to choose a destination and select what to export (Images, Videos, Other files) and whether to flatten folders
 
 ## 🎯 Supported Formats
 

@@ -1,7 +1,11 @@
-import Foundation
 import AppKit
+import Foundation
 
 class TexDecoder {
+    struct Options {
+        var premultiplyAlpha: Bool = true
+        var colorSpace: CGColorSpace = CGColorSpaceCreateDeviceRGB()
+    }
     struct Header {
         let format: Int32
         let flags: UInt32
@@ -12,6 +16,10 @@ class TexDecoder {
     }
 
     static func decode(_ data: Data) throws -> NSImage? {
+        return try decode(data, options: Options())
+    }
+
+    static func decode(_ data: Data, options: Options) throws -> NSImage? {
         var p = 0
 
         func readNString(max: Int) -> String? {
@@ -30,13 +38,17 @@ class TexDecoder {
 
         func readI32() -> Int32? {
             guard p + 4 <= data.count else { return nil }
-            let v: Int32 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: p, as: Int32.self) }
+            let v: Int32 = data.withUnsafeBytes {
+                $0.loadUnaligned(fromByteOffset: p, as: Int32.self)
+            }
             p += 4
             return v
         }
         func readU32() -> UInt32? {
             guard p + 4 <= data.count else { return nil }
-            let v: UInt32 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: p, as: UInt32.self) }
+            let v: UInt32 = data.withUnsafeBytes {
+                $0.loadUnaligned(fromByteOffset: p, as: UInt32.self)
+            }
             p += 4
             return v
         }
@@ -47,12 +59,13 @@ class TexDecoder {
 
         // Header
         guard let format = readI32(),
-              let flagsI = readI32(),
-              let texW = readI32(),
-              let texH = readI32(),
-              let imgW = readI32(),
-              let imgH = readI32(),
-              readU32() != nil else { return nil }
+            let flagsI = readI32(),
+            let texW = readI32(),
+            let texH = readI32(),
+            let imgW = readI32(),
+            let imgH = readI32(),
+            readU32() != nil
+        else { return nil }
 
         let header = Header(
             format: format,
@@ -73,7 +86,7 @@ class TexDecoder {
 
         // Version specifics
         var containerVersion = 0
-        var containerImageFormat: Int = -1 // FreeImageFormat, -1 = unknown
+        var containerImageFormat: Int = -1  // FreeImageFormat, -1 = unknown
         var isVideoMp4 = false
         if containerMagic.hasPrefix("TEXB") {
             if let v = Int(containerMagic.suffix(4)) { containerVersion = v }
@@ -93,7 +106,7 @@ class TexDecoder {
             // RePKG treats v4 as v3 for non-MP4 images (no extra params to read)
         }
 
-        // Read first image only
+        // Read first image only (we may read more later for mipmaps)
         guard let mipCountI = readI32() else { return nil }
         let mipCount = Int(mipCountI)
         guard mipCount > 0 && mipCount < 64 else { return nil }
@@ -107,22 +120,26 @@ class TexDecoder {
             guard let countI = readI32() else { return nil }
             let count = Int(countI)
             guard count >= 0, p + count <= data.count else { return nil }
-            let sub = data.subdata(in: p..<p+count)
+            let sub = data.subdata(in: p..<p + count)
             p += count
             return sub
         }
 
         if containerVersion == 1 {
             guard let w = readI32(), let h = readI32(), let b = readBytesBlock() else { return nil }
-            mipWidth = Int(w); mipHeight = Int(h); bytes = b
+            mipWidth = Int(w)
+            mipHeight = Int(h)
+            bytes = b
         } else {
             // v2 or v3
             guard let w = readI32(),
-                  let h = readI32(),
-                  let isLZ4I = readI32(),
-                  let decompSizeI = readI32(),
-                  let b = readBytesBlock() else { return nil }
-            mipWidth = Int(w); mipHeight = Int(h)
+                let h = readI32(),
+                let isLZ4I = readI32(),
+                let decompSizeI = readI32(),
+                let b = readBytesBlock()
+            else { return nil }
+            mipWidth = Int(w)
+            mipHeight = Int(h)
             let isLZ4 = (isLZ4I == 1)
             if isLZ4 {
                 let decompSize = Int(decompSizeI)
@@ -138,9 +155,10 @@ class TexDecoder {
         guard mipWidth > 0, mipHeight > 0, mipWidth <= 16384, mipHeight <= 16384 else { return nil }
 
         // Check if the data is actually a video file by looking for MP4 signature
-        let isActuallyMP4 = bytes.count > 12 && (
-            (bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70) // "ftyp"
-        )
+        let isActuallyMP4 =
+            bytes.count > 12
+            && ((bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70)  // "ftyp"
+                )
 
         // Skip video files - we can't convert them to PNG
         if isActuallyMP4 || (isVideoMp4 && containerImageFormat == 35) {
@@ -153,8 +171,9 @@ class TexDecoder {
             if let img = NSImage(data: bytes) { return img }
             // As a fallback, try ImageIO via CGImageSource (in case of uncommon headers)
             if let src = CGImageSourceCreateWithData(bytes as CFData, nil),
-               CGImageSourceGetCount(src) > 0,
-               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+                CGImageSourceGetCount(src) > 0,
+                let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+            {
                 return NSImage(cgImage: cg, size: .zero)
             }
             return nil
@@ -162,29 +181,197 @@ class TexDecoder {
 
         // Choose decode based on TexFormat
         switch header.format {
-        case 0: // RGBA8888
-            return decodeRGBA8888(bytes, width: mipWidth, height: mipHeight)
-        case 4: // DXT5
-            return decodeDXT5(bytes, width: mipWidth, height: mipHeight)
-        case 6: // DXT3
-            return decodeDXT3(bytes, width: mipWidth, height: mipHeight)
-        case 7: // DXT1
-            return decodeDXT1(bytes, width: mipWidth, height: mipHeight)
-        case 8: // RG88 (2 channels)
-            return decodeRG88(bytes, width: mipWidth, height: mipHeight)
-        case 9: // R8 (1 channel - grayscale)
-            return decodeR8(bytes, width: mipWidth, height: mipHeight)
+        case 0:  // RGBA8888
+            return decodeRGBA8888(bytes, width: mipWidth, height: mipHeight, options: options)
+        case 4:  // DXT5
+            return decodeDXT5(bytes, width: mipWidth, height: mipHeight, options: options)
+        case 6:  // DXT3
+            return decodeDXT3(bytes, width: mipWidth, height: mipHeight, options: options)
+        case 7:  // DXT1
+            return decodeDXT1(bytes, width: mipWidth, height: mipHeight, options: options)
+        case 8:  // RG88 (2 channels)
+            return decodeRG88(bytes, width: mipWidth, height: mipHeight, options: options)
+        case 9:  // R8 (1 channel - grayscale)
+            return decodeR8(bytes, width: mipWidth, height: mipHeight, options: options)
         default:
             return nil
         }
     }
 
-    private static func decodeRGBA8888(_ data: Data, width: Int, height: Int) -> NSImage? {
+    static func decodeAllMipmaps(_ data: Data, options: Options) throws -> [NSImage] {
+        var p = 0
+
+        func readNString(max: Int) -> String? {
+            guard p < data.count else { return nil }
+            let end = (max == Int.max) ? data.count : min(data.count, p + max)
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(min(1024, max))
+            while p < end {
+                let b = data[p]
+                p += 1
+                if b == 0 { break }
+                bytes.append(b)
+            }
+            return String(bytes: bytes, encoding: .utf8)
+        }
+        func readI32() -> Int32? {
+            guard p + 4 <= data.count else { return nil }
+            let v: Int32 = data.withUnsafeBytes {
+                $0.loadUnaligned(fromByteOffset: p, as: Int32.self)
+            }
+            p += 4
+            return v
+        }
+        func readU32() -> UInt32? {
+            guard p + 4 <= data.count else { return nil }
+            let v: UInt32 = data.withUnsafeBytes {
+                $0.loadUnaligned(fromByteOffset: p, as: UInt32.self)
+            }
+            p += 4
+            return v
+        }
+        func readBytesBlock() -> Data? {
+            guard let countI = readI32() else { return nil }
+            let count = Int(countI)
+            guard count >= 0, p + count <= data.count else { return nil }
+            let sub = data.subdata(in: p..<p + count)
+            p += count
+            return sub
+        }
+
+        guard let magic1 = readNString(max: 16), magic1 == "TEXV0005" else { return [] }
+        guard let magic2 = readNString(max: 16), magic2 == "TEXI0001" else { return [] }
+
+        guard let format = readI32(),
+            let flagsI = readI32(),
+            let texW = readI32(),
+            let texH = readI32(),
+            let imgW = readI32(),
+            let imgH = readI32(),
+            readU32() != nil
+        else { return [] }
+
+        let header = Header(
+            format: format,
+            flags: UInt32(bitPattern: flagsI),
+            textureWidth: Int(texW),
+            textureHeight: Int(texH),
+            imageWidth: Int(imgW),
+            imageHeight: Int(imgH)
+        )
+
+        guard header.textureWidth > 0, header.textureHeight > 0 else { return [] }
+
+        guard let containerMagic = readNString(max: 16) else { return [] }
+        guard let imageCountI = readI32() else { return [] }
+        let imageCount = Int(imageCountI)
+        guard imageCount > 0 && imageCount < 4096 else { return [] }
+
+        var containerVersion = 0
+        var containerImageFormat: Int = -1
+        var isVideoMp4 = false
+        if containerMagic.hasPrefix("TEXB") {
+            if let v = Int(containerMagic.suffix(4)) { containerVersion = v }
+        }
+        if containerVersion == 3 {
+            if let fmt = readI32() { containerImageFormat = Int(fmt) }
+        } else if containerVersion == 4 {
+            if let fmt = readI32() { containerImageFormat = Int(fmt) }
+            if let mp4 = readI32() { isVideoMp4 = (mp4 == 1) }
+            if containerImageFormat == -1 && isVideoMp4 { containerImageFormat = 35 }
+        }
+
+        guard let mipCountI = readI32() else { return [] }
+        let mipCount = Int(mipCountI)
+        guard mipCount > 0 && mipCount < 64 else { return [] }
+
+        // If encoded as PNG/JPEG inside container, just decode first image and return single image
+        if containerImageFormat != -1 {
+            // Read first mip bytes block (width/height for v2+)
+            var w = Int(header.imageWidth)
+            var h = Int(header.imageHeight)
+            if containerVersion != 1 {
+                guard let wi = readI32(), let hi = readI32(), readI32() != nil, readI32() != nil,
+                    let b = readBytesBlock()
+                else { return [] }
+                w = Int(wi)
+                h = Int(hi)
+                if let img = NSImage(data: b) { return [img] }
+                if let src = CGImageSourceCreateWithData(b as CFData, nil),
+                    CGImageSourceGetCount(src) > 0,
+                    let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+                {
+                    return [NSImage(cgImage: cg, size: .zero)]
+                }
+            } else {
+                guard let wi = readI32(), let hi = readI32(), let b = readBytesBlock() else {
+                    return []
+                }
+                w = Int(wi)
+                h = Int(hi)
+                if let img = NSImage(data: b) { return [img] }
+                if let src = CGImageSourceCreateWithData(b as CFData, nil),
+                    CGImageSourceGetCount(src) > 0,
+                    let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+                {
+                    return [NSImage(cgImage: cg, size: .zero)]
+                }
+            }
+            return []
+        }
+
+        var images: [NSImage] = []
+        for _ in 0..<mipCount {
+            var w = 0
+            var h = 0
+            var bytes = Data()
+            if containerVersion == 1 {
+                guard let wi = readI32(), let hi = readI32(), let b = readBytesBlock() else {
+                    break
+                }
+                w = Int(wi)
+                h = Int(hi)
+                bytes = b
+            } else {
+                guard let wi = readI32(), let hi = readI32(), let isLZ4I = readI32(),
+                    let decompSizeI = readI32(), let b = readBytesBlock()
+                else { break }
+                w = Int(wi)
+                h = Int(hi)
+                if isLZ4I == 1 {
+                    let decompSize = Int(decompSizeI)
+                    guard decompSize > 0 && decompSize <= 512 * 1024 * 1024 else { break }
+                    bytes = try LZ4Decompressor.decompress(b, outputSize: decompSize)
+                } else {
+                    bytes = b
+                }
+            }
+            guard w > 0, h > 0 else { continue }
+            let img: NSImage?
+            switch header.format {
+            case 0: img = decodeRGBA8888(bytes, width: w, height: h, options: options)
+            case 4: img = decodeDXT5(bytes, width: w, height: h, options: options)
+            case 6: img = decodeDXT3(bytes, width: w, height: h, options: options)
+            case 7: img = decodeDXT1(bytes, width: w, height: h, options: options)
+            case 8: img = decodeRG88(bytes, width: w, height: h, options: options)
+            case 9: img = decodeR8(bytes, width: w, height: h, options: options)
+            default: img = nil
+            }
+            if let im = img { images.append(im) }
+        }
+        return images
+    }
+
+    private static func decodeRGBA8888(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         let bytesPerPixel = 4
         // Use 64-bit math to avoid overflow, then validate against reasonable caps
         let expectedSize64 = Int64(width) * Int64(height) * Int64(bytesPerPixel)
         guard width > 0, height > 0, width <= 16384, height <= 16384,
-              expectedSize64 > 0, expectedSize64 <= Int64(data.count), expectedSize64 <= Int64(Int.max) else {
+            expectedSize64 > 0, expectedSize64 <= Int64(data.count),
+            expectedSize64 <= Int64(Int.max)
+        else {
             return nil
         }
         let expectedSize = Int(expectedSize64)
@@ -192,14 +379,17 @@ class TexDecoder {
         var rgbaData = Data(count: expectedSize)
         rgbaData.withUnsafeMutableBytes { destPtr in
             data.withUnsafeBytes { srcPtr in
-                destPtr.copyMemory(from: UnsafeRawBufferPointer(start: srcPtr.baseAddress, count: expectedSize))
+                destPtr.copyMemory(
+                    from: UnsafeRawBufferPointer(start: srcPtr.baseAddress, count: expectedSize))
             }
         }
 
-        return createImage(from: rgbaData, width: width, height: height)
+        return createImage(from: rgbaData, width: width, height: height, options: options)
     }
 
-    private static func decodeDXT1(_ data: Data, width: Int, height: Int) -> NSImage? {
+    private static func decodeDXT1(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         guard width > 0, height > 0, width < 16384, height < 16384 else { return nil }
 
         let blockWidth = (width + 3) / 4
@@ -217,11 +407,17 @@ class TexDecoder {
                 let blockOffset = blockIndex * 8
                 guard blockOffset + 8 <= data.count else { continue }
 
-                let c0 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset, as: UInt16.self) }
-                let c1 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 2, as: UInt16.self) }
-                let codes = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 4, as: UInt32.self) }
-
+                let c0 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset, as: UInt16.self)
+                }
+                let c1 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 2, as: UInt16.self)
+                }
+                let codes = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 4, as: UInt32.self)
+                }
                 let colors = interpolateDXT1Colors(c0, c1)
+                let useTransparent = c0 <= c1
 
                 for y in 0..<4 {
                     for x in 0..<4 {
@@ -236,7 +432,11 @@ class TexDecoder {
                             rgba[pixelIndex] = color.0
                             rgba[pixelIndex + 1] = color.1
                             rgba[pixelIndex + 2] = color.2
-                            rgba[pixelIndex + 3] = 255
+                            if useTransparent && codeIndex == 3 {
+                                rgba[pixelIndex + 3] = 0
+                            } else {
+                                rgba[pixelIndex + 3] = 255
+                            }
                         }
                     }
                 }
@@ -245,10 +445,12 @@ class TexDecoder {
             }
         }
 
-        return createImage(from: Data(rgba), width: width, height: height)
+        return createImage(from: Data(rgba), width: width, height: height, options: options)
     }
 
-    private static func decodeDXT3(_ data: Data, width: Int, height: Int) -> NSImage? {
+    private static func decodeDXT3(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         guard width > 0, height > 0, width < 16384, height < 16384 else { return nil }
 
         // DXT3 has 16 bytes per block (8 for alpha, 8 for color)
@@ -267,15 +469,26 @@ class TexDecoder {
                 let blockOffset = blockIndex * 16
                 guard blockOffset + 16 <= data.count else { continue }
 
-                // Read alpha block (8 bytes)
-                let alphaBlock = data.subdata(in: blockOffset..<blockOffset + 8)
+                // Read alpha block (8 bytes, little-endian 64-bit, 4 bits per pixel)
+                var alphaBits: UInt64 = 0
+                for i in 0..<8 {
+                    let b = UInt64(data[blockOffset + i])
+                    alphaBits |= (b << (8 * i))
+                }
 
                 // Read color block (8 bytes)
-                let c0 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 8, as: UInt16.self) }
-                let c1 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 10, as: UInt16.self) }
-                let codes = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 12, as: UInt32.self) }
+                let c0 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 8, as: UInt16.self)
+                }
+                let c1 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 10, as: UInt16.self)
+                }
+                let codes = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 12, as: UInt32.self)
+                }
 
                 let colors = interpolateDXT1Colors(c0, c1)
+                let useTransparent = c0 <= c1
 
                 for y in 0..<4 {
                     for x in 0..<4 {
@@ -286,16 +499,20 @@ class TexDecoder {
                             let codeIndex = (codes >> ((y * 4 + x) * 2)) & 0x3
                             let color = colors[Int(codeIndex)]
 
-                            // Extract alpha (4 bits per pixel)
+                            // Extract alpha (4 bits per pixel) and scale to 8-bit
                             let alphaIndex = y * 4 + x
-                            let alphaByte = alphaBlock[alphaIndex / 2]
-                            let alpha = (alphaIndex % 2 == 0) ? (alphaByte & 0x0F) << 4 : alphaByte & 0xF0
+                            let nibble = UInt8((alphaBits >> (4 * alphaIndex)) & 0xF)
+                            let alpha = UInt8(Int(nibble) * 17)  // 0..15 -> 0..255
 
                             let pixelIndex = (py * width + px) * 4
                             rgba[pixelIndex] = color.0
                             rgba[pixelIndex + 1] = color.1
                             rgba[pixelIndex + 2] = color.2
-                            rgba[pixelIndex + 3] = alpha
+                            if useTransparent && codeIndex == 3 {
+                                rgba[pixelIndex + 3] = 0
+                            } else {
+                                rgba[pixelIndex + 3] = alpha
+                            }
                         }
                     }
                 }
@@ -304,10 +521,12 @@ class TexDecoder {
             }
         }
 
-        return createImage(from: Data(rgba), width: width, height: height)
+        return createImage(from: Data(rgba), width: width, height: height, options: options)
     }
 
-    private static func decodeDXT5(_ data: Data, width: Int, height: Int) -> NSImage? {
+    private static func decodeDXT5(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         guard width > 0, height > 0, width < 16384, height < 16384 else { return nil }
 
         // Similar to DXT3 but with interpolated alpha
@@ -329,12 +548,24 @@ class TexDecoder {
                 let alpha0 = data[blockOffset]
                 let alpha1 = data[blockOffset + 1]
                 let alphas = interpolateDXT5Alphas(alpha0, alpha1)
+                // Next 6 bytes contain 16 3-bit alpha indices (little-endian)
+                var alphaIndexBits: UInt64 = 0
+                for i in 0..<6 {
+                    alphaIndexBits |= UInt64(data[blockOffset + 2 + i]) << (8 * i)
+                }
 
-                let c0 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 8, as: UInt16.self) }
-                let c1 = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 10, as: UInt16.self) }
-                let codes = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: blockOffset + 12, as: UInt32.self) }
+                let c0 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 8, as: UInt16.self)
+                }
+                let c1 = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 10, as: UInt16.self)
+                }
+                let codes = data.withUnsafeBytes {
+                    $0.loadUnaligned(fromByteOffset: blockOffset + 12, as: UInt32.self)
+                }
 
                 let colors = interpolateDXT1Colors(c0, c1)
+                let useTransparent = c0 <= c1
 
                 for y in 0..<4 {
                     for x in 0..<4 {
@@ -345,11 +576,20 @@ class TexDecoder {
                             let codeIndex = (codes >> ((y * 4 + x) * 2)) & 0x3
                             let color = colors[Int(codeIndex)]
 
+                            // Extract 3-bit alpha index for this texel
+                            let alphaTexel = y * 4 + x
+                            let aidx = Int((alphaIndexBits >> (alphaTexel * 3)) & 0x7)
+                            let alpha = alphas[aidx]
+
                             let pixelIndex = (py * width + px) * 4
                             rgba[pixelIndex] = color.0
                             rgba[pixelIndex + 1] = color.1
                             rgba[pixelIndex + 2] = color.2
-                            rgba[pixelIndex + 3] = alphas[0] // Simplified alpha
+                            if useTransparent && codeIndex == 3 {
+                                rgba[pixelIndex + 3] = 0
+                            } else {
+                                rgba[pixelIndex + 3] = alpha
+                            }
                         }
                     }
                 }
@@ -358,10 +598,11 @@ class TexDecoder {
             }
         }
 
-        return createImage(from: Data(rgba), width: width, height: height)
+        return createImage(from: Data(rgba), width: width, height: height, options: options)
     }
 
-    private static func interpolateDXT1Colors(_ c0: UInt16, _ c1: UInt16) -> [(UInt8, UInt8, UInt8)] {
+    private static func interpolateDXT1Colors(_ c0: UInt16, _ c1: UInt16) -> [(UInt8, UInt8, UInt8)]
+    {
         // Expand 5:6:5 to 8-bit channels using Int math to avoid UInt8 overflow
         let r0i = (Int(c0) >> 11) & 0x1F
         let g0i = (Int(c0) >> 5) & 0x3F
@@ -383,21 +624,35 @@ class TexDecoder {
         let c0t: (UInt8, UInt8, UInt8) = (UInt8(r0), UInt8(g0), UInt8(b0))
         let c1t: (UInt8, UInt8, UInt8) = (UInt8(r1), UInt8(g1), UInt8(b1))
 
-        // Interpolate with safe Int math
-        let r2 = min(255, (2 * r0 + r1) / 3)
-        let g2 = min(255, (2 * g0 + g1) / 3)
-        let b2 = min(255, (2 * b0 + b1) / 3)
+        if c0 > c1 {
+            // 4-color block: derive two interpolated colors
+            let r2 = min(255, (2 * r0 + r1) / 3)
+            let g2 = min(255, (2 * g0 + g1) / 3)
+            let b2 = min(255, (2 * b0 + b1) / 3)
 
-        let r3 = min(255, (r0 + 2 * r1) / 3)
-        let g3 = min(255, (g0 + 2 * g1) / 3)
-        let b3 = min(255, (b0 + 2 * b1) / 3)
+            let r3 = min(255, (r0 + 2 * r1) / 3)
+            let g3 = min(255, (g0 + 2 * g1) / 3)
+            let b3 = min(255, (b0 + 2 * b1) / 3)
 
-        return [
-            c0t,
-            c1t,
-            (UInt8(r2), UInt8(g2), UInt8(b2)),
-            (UInt8(r3), UInt8(g3), UInt8(b3))
-        ]
+            return [
+                c0t,
+                c1t,
+                (UInt8(r2), UInt8(g2), UInt8(b2)),
+                (UInt8(r3), UInt8(g3), UInt8(b3)),
+            ]
+        } else {
+            // 3-color block: derive one interpolated color, last is transparent
+            let r2 = (r0 + r1) / 2
+            let g2 = (g0 + g1) / 2
+            let b2 = (b0 + b1) / 2
+            // The 4th entry will be treated as transparent in the decoders
+            return [
+                c0t,
+                c1t,
+                (UInt8(r2), UInt8(g2), UInt8(b2)),
+                (0, 0, 0),
+            ]
+        }
     }
 
     private static func interpolateDXT5Alphas(_ a0: UInt8, _ a1: UInt8) -> [UInt8] {
@@ -416,7 +671,9 @@ class TexDecoder {
         return alphas
     }
 
-    private static func decodeR8(_ data: Data, width: Int, height: Int) -> NSImage? {
+    private static func decodeR8(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         // R8: 1 byte per pixel (grayscale)
         let expectedSize = width * height
         guard data.count >= expectedSize else { return nil }
@@ -432,10 +689,12 @@ class TexDecoder {
             rgba[i * 4 + 3] = 255
         }
 
-        return createImage(from: Data(rgba), width: width, height: height)
+        return createImage(from: Data(rgba), width: width, height: height, options: options)
     }
 
-    private static func decodeRG88(_ data: Data, width: Int, height: Int) -> NSImage? {
+    private static func decodeRG88(_ data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         // RG88: 2 bytes per pixel (red and green channels)
         let expectedSize = width * height * 2
         guard data.count >= expectedSize else { return nil }
@@ -444,35 +703,41 @@ class TexDecoder {
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
 
         for i in 0..<(width * height) {
-            rgba[i * 4] = data[i * 2]         // R
-            rgba[i * 4 + 1] = data[i * 2 + 1] // G
-            rgba[i * 4 + 2] = 0                // B
-            rgba[i * 4 + 3] = 255              // A
+            rgba[i * 4] = data[i * 2]  // R
+            rgba[i * 4 + 1] = data[i * 2 + 1]  // G
+            rgba[i * 4 + 2] = 0  // B
+            rgba[i * 4 + 3] = 255  // A
         }
 
-        return createImage(from: Data(rgba), width: width, height: height)
+        return createImage(from: Data(rgba), width: width, height: height, options: options)
     }
 
-    private static func createImage(from data: Data, width: Int, height: Int) -> NSImage? {
+    private static func createImage(from data: Data, width: Int, height: Int, options: Options)
+        -> NSImage?
+    {
         let bitsPerComponent = 8
         let bitsPerPixel = 32
         let bytesPerRow = width * 4
 
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
 
-        guard let cgImage = CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: bitsPerComponent,
-            bitsPerPixel: bitsPerPixel,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        ) else { return nil }
+        guard
+            let cgImage = CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: bitsPerComponent,
+                bitsPerPixel: bitsPerPixel,
+                bytesPerRow: bytesPerRow,
+                space: options.colorSpace,
+                bitmapInfo: CGBitmapInfo(
+                    rawValue: (options.premultiplyAlpha
+                        ? CGImageAlphaInfo.premultipliedLast : CGImageAlphaInfo.last).rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        else { return nil }
 
         let size = NSSize(width: width, height: height)
         return NSImage(cgImage: cgImage, size: size)

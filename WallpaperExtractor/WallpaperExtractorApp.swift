@@ -16,6 +16,10 @@ struct WallpaperExtractorApp: App {
             ContentView()
                 .environmentObject(extractor)
                 .frame(minWidth: 900, minHeight: 600)
+                .onAppear {
+                    // Cleanup temp directory once at launch
+                    extractor.cleanupTemporaryRawDirectory()
+                }
                 .onOpenURL { url in
                     Task {
                         try? await extractor.extractPackage(from: url)
